@@ -16,6 +16,30 @@ class Section:
     text: str
 
 
+def split_oversized_sections(sections: list[Section], limit: int) -> tuple[list[Section], list[str]]:
+    result, warnings = [], []
+    for section in sections:
+        if len(section.text) <= limit:
+            result.append(section)
+            continue
+        remaining = section.text.strip()
+        parts = []
+        while remaining:
+            if len(remaining) <= limit:
+                parts.append(remaining)
+                break
+            cut = remaining.rfind("\n\n", 0, limit + 1)
+            if cut <= 0:
+                sentence_points = [match.end() for match in re.finditer(r"(?<=[.!?。！？])\s+", remaining[:limit + 1])]
+                cut = sentence_points[-1] if sentence_points else limit
+            parts.append(remaining[:cut].strip())
+            remaining = remaining[cut:].lstrip()
+        for index, part in enumerate(parts, 1):
+            result.append(Section(f"{section.title} (Part {index})", part))
+        warnings.append(f"{section.title} exceeded {limit} characters and was split into {len(parts)} ordered parts.")
+    return result, warnings
+
+
 def clean(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", re.sub(r"[ \t]+", " ", text.replace("\r\n", "\n"))).strip()
 

@@ -2,6 +2,9 @@ import io
 import os
 import shutil
 import zipfile
+from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
 
 os.environ["APP_DATA_DIR"] = ".test-runtime"
 os.environ["LLM_BACKEND"] = "mock"
@@ -24,18 +27,64 @@ def test_health_and_txt_fallback():
     doc = upload("book.txt", "A quiet opening paragraph.\n\nA second paragraph.")
     assert len(doc["chapters"]) == 1
     markdown = client.get(f"/documents/{doc['document_id']}/markdown").json()["markdown"]
-    assert "schema: chapter-translation-v1" in markdown
+    assert "schema: chapter-translation-v2" in markdown
     assert "A quiet opening" in markdown
 
 
-def test_ui_route_returns_branded_html_controls():
-    response = client.get("/ui")
-    assert response.status_code == 200
-    assert "text/html" in response.headers["content-type"]
-    assert "MTL-Proposal" in response.text
-    assert 'id="upload-form"' in response.text
-    assert 'id="analyze-button"' in response.text
-    assert 'id="translate-button"' in response.text
+def test_duplicate_upload_is_idempotent_and_reuses_chapters():
+    source = b"Duplicate-safe paragraph.\n\nSecond paragraph."
+    first = client.post("/documents", files={"file": ("duplicate.txt", source, "text/plain")})
+    second = client.post("/documents", files={"file": ("duplicate.txt", source, "text/plain")})
+    assert first.status_code == 201
+    assert second.status_code == 200
+    first_data, second_data = first.json(), second.json()
+    assert first_data["already_exists"] is False
+    assert second_data["already_exists"] is True
+    assert first_data["document_id"] == second_data["document_id"]
+    assert len(first_data["chapters"]) == len(second_data["chapters"])
+    assert len(client.get(f"/documents/{first_data['document_id']}/chapters").json()["chapters"]) == len(first_data["chapters"])
+    assert "already imported" in second_data["warnings"][0]
+
+
+def test_root_introduction_and_frontend_file():
+    response = client.get("/")
+    data = response.json()
+    assert data["required_endpoints"]["POST /predict"] == "direct text prediction"
+    frontend = (Path(__file__).parents[1] / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert "http://127.0.0.1:8000" in frontend
+    assert 'id="upload-form"' in frontend
+    assert 'id="analyze-button"' in frontend
+    assert 'id="translate-button"' in frontend
+    assert "already_exists" in frontend
+    assert "needs-review" in frontend
+    assert "Review required" in frontend
+    assert "review-instruction" in frontend
+    assert 'id="glossary-review-count"' in frontend
+    assert "needs_review: 'Needs review'" in frontend
+    assert '<option value="approved">Approved</option>' in frontend
+    assert '<option value="rejected">Rejected</option>' in frontend
+    assert client.get("/").headers["x-request-id"]
+    assert "app;dur=" in client.get("/").headers["server-timing"]
+
+
+def test_removed_documentation_and_ui_routes_are_404():
+    for path in ("/ui", "/docs", "/redoc", "/openapi.json"):
+        assert client.get(path).status_code == 404
+
+
+def test_cors_allows_configured_frontend_origin():
+    response = client.get("/", headers={"Origin": "http://127.0.0.1:3000"})
+    assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:3000"
+
+
+def test_health_unavailable_returns_503(monkeypatch):
+    import app.main as main
+
+    monkeypatch.setattr(main, "settings", SimpleNamespace(backend="llamacpp"))
+    monkeypatch.setattr(main, "backend", lambda: SimpleNamespace(health=lambda: {"status": "offline", "backend": "llamacpp"}))
+    response = client.get("/health")
+    assert response.status_code == 503
+    assert response.json()["detail"]["status"] == "offline"
 
 
 def test_markdown_chapters_and_glossary_reuse():
@@ -46,9 +95,44 @@ def test_markdown_chapters_and_glossary_reuse():
     assert analysis.status_code == 200
     update = client.put(f"/documents/{doc['document_id']}/glossary/Alice", json={"source_term": "Alice", "target_term": "Alicia", "status": "approved"})
     assert update.status_code == 200
-    prediction = client.post("/predict", json={"document_id": doc["document_id"], "chapter_id": chapter["id"], "source_language": "Japanese", "target_language": "English"})
+    prediction = client.post(f"/documents/{doc['document_id']}/chapters/{chapter['id']}/translate", json={"source_language": "Japanese", "target_language": "English"})
     assert prediction.status_code == 200
     assert "Alicia" in prediction.json()["markdown"]
+
+
+def test_direct_predict_validates_and_invokes_mock_backend():
+    response = client.post("/predict", json={"text": "Alice meets Bob.\n\nBob returns.", "source_language": "English", "target_language": "Japanese", "glossary": [{"source_term": "Alice", "target_term": "Alicia"}]})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["paragraphs"] == ["Alicia meets Bob.", "Bob returns."]
+    assert data["source_language"] == "English"
+    assert client.post("/predict", json={"text": "   "}).status_code == 422
+
+
+def test_oversized_model_inputs_return_413(monkeypatch):
+    import app.main as main
+    doc = upload("limit.txt", "A paragraph that is intentionally longer than the test limit.")
+    monkeypatch.setattr(main, "settings", replace(main.settings, max_model_input_chars=10))
+    assert client.post("/predict", json={"text": "01234567890"}).status_code == 413
+    chapter = doc["chapters"][0]
+    assert client.post(f"/documents/{doc['document_id']}/chapters/{chapter['id']}/analyze").status_code == 413
+    assert client.post(f"/documents/{doc['document_id']}/chapters/{chapter['id']}/translate", json={}).status_code == 413
+
+
+def test_large_import_is_split_in_order_without_text_loss(monkeypatch):
+    import app.main as main
+    monkeypatch.setattr(main, "settings", replace(main.settings, max_model_input_chars=100))
+    source = "\n\n".join(f"Paragraph {index:03d} with stable source text." for index in range(12))
+    response = client.post("/documents", files={"file": ("large.txt", source.encode(), "text/plain")})
+    assert response.status_code == 201
+    data = response.json()
+    assert data["warnings"] and len(data["chapters"]) > 1
+    assert data["chapters"][0]["title"] == "Section 1 (Part 1)"
+    assert data["chapters"][1]["title"] == "Section 1 (Part 2)"
+    stored = client.get(f"/documents/{data['document_id']}/chapters").json()["chapters"]
+    assert [item["ordinal"] for item in stored] == list(range(1, len(stored) + 1))
+    old_id = main.ident("large.txt", source.encode().hex())
+    assert data["document_id"] != old_id
 
 
 def test_rejects_unsupported_and_empty():
@@ -63,7 +147,7 @@ def test_cjk_alias_replacement_and_only_relevant_unresolved_warning():
     assert client.put(base + "/日本語", json={"source_term": "日本語", "target_term": "Japanese", "aliases": ["일본어"], "status": "approved"}).status_code == 200
     assert client.put(base + "/한국어", json={"source_term": "한국어", "target_term": "Korean", "status": "suggested"}).status_code == 200
     assert client.put(base + "/unseen", json={"source_term": "unseen", "target_term": "unused", "status": "approved"}).status_code == 200
-    result = client.post("/predict", json={"document_id": doc["document_id"], "chapter_id": chapter["id"]}).json()
+    result = client.post(f"/documents/{doc['document_id']}/chapters/{chapter['id']}/translate", json={}).json()
     assert "Japanese" in result["markdown"]
     assert result["warnings"] == ["unresolved glossary term: 한국어"]
 
