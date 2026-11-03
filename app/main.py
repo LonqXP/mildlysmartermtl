@@ -18,10 +18,10 @@ from .terms import contains_any, normalize_term
 
 settings = load_settings()
 store = Store(settings.data_dir)
-app = FastAPI(title="MTL-Proposal", description="Chapter-by-chapter literary translation JSON API", version="0.1.0", docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title="mildlysmartermtl", description="mildlysmartermtl chapter-by-chapter literary translation JSON API", version="0.1.0", docs_url=None, redoc_url=None, openapi_url=None)
 app.add_middleware(CORSMiddleware, allow_origins=list(settings.frontend_origins), allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 _backend_instance = None
-logger = logging.getLogger("uvicorn.error")
+logger = logging.getLogger("uvicorn.error.mildlysmartermtl")
 CANONICAL_SCHEMA = "chapter-translation-v2"
 
 

@@ -1,3 +1,7 @@
+# mildlysmartermtl
+
+Chapter-by-chapter literary translation with a local llama.cpp backend and a separate browser frontend.
+
 ## Information
 
 - Name: Nguyễn Hoàng Long

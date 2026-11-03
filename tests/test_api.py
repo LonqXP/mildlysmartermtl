@@ -51,6 +51,7 @@ def test_root_introduction_and_frontend_file():
     data = response.json()
     assert data["required_endpoints"]["POST /predict"] == "direct text prediction"
     frontend = (Path(__file__).parents[1] / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert "mildlysmartermtl" in frontend
     assert "http://127.0.0.1:8000" in frontend
     assert 'id="upload-form"' in frontend
     assert 'id="analyze-button"' in frontend

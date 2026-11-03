@@ -8,7 +8,7 @@ import httpx
 
 from .terms import replace_terms
 
-logger = logging.getLogger("uvicorn.error")
+logger = logging.getLogger("uvicorn.error.mildlysmartermtl")
 
 
 class MockBackend:
